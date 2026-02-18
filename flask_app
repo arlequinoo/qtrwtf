@@ -1,0 +1,115 @@
+from flask import Flask, request, jsonify
+import json
+import telepot
+import urllib3
+
+KEYS_FILE = "/home/arle/keys.json"
+SECRET = "my_bot_webhook_path_123"
+
+proxy_url = "http://proxy.server:3128"
+telepot.api._pools = {
+    'default': urllib3.ProxyManager(proxy_url=proxy_url),
+}
+
+bot = telepot.Bot(TOKEN)
+app = Flask(__name__)
+
+def load_keys():
+    with open(KEYS_FILE, encoding="utf-8") as f:
+        return json.load(f)
+
+def save_keys(data):
+    with open(KEYS_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+
+from datetime import datetime
+
+@app.route("/check", methods=["GET"])
+def check():
+    key  = request.args.get("key", "").upper()
+    hwid = request.args.get("hwid", "").lower()
+
+    if not key or not hwid:
+        return jsonify(status="error")
+
+    keys = load_keys()
+
+    if key not in keys:
+        return jsonify(status="not_found")
+
+    record = keys[key]
+
+    # Сначала бан
+    if record.get("banned", False):
+        return jsonify(status="banned")
+
+    # Потом проверка — был ли выдан ботом
+    if not record.get("issued", False):
+        return jsonify(status="not_issued")
+
+    # Если ключ ещё не использовался — привязываем HWID
+    if not record.get("is_use", False):
+        record["is_use"] = True
+        record["hwid"] = hwid
+        record["used_at"] = datetime.utcnow().isoformat()
+        save_keys(keys)
+        return jsonify(status="ok")
+
+    # Если уже использовался — проверяем HWID
+    if record.get("hwid") == hwid:
+        return jsonify(status="ok")
+    else:
+        return jsonify(status="used")
+
+
+@app.route(f"/{SECRET}", methods=["POST"])
+def telegram_webhook():
+    update = request.get_json(force=True)
+    if "message" not in update:
+        return "OK", 200
+
+    msg = update["message"]
+    chat_id = msg["chat"]["id"]
+    text = msg.get("text", "")
+
+    # команда /getkey
+    if text == "/getkey" and chat_id == ADMIN_ID:
+        keys = load_keys()
+        for k, v in keys.items():
+            if (not v.get("is_use", False)
+                and not v.get("banned", False)
+                and not v.get("issued", False)):
+
+                v["issued"] = True
+                save_keys(keys)
+
+                bot.sendMessage(chat_id, k)
+                return "OK", 200
+
+        bot.sendMessage(chat_id, "Свободных ключей нет.")
+        return "OK", 200
+
+
+    # команда /ban <ключ>
+    if text.startswith("/ban ") and chat_id == ADMIN_ID:
+        _, key = text.split(maxsplit=1)
+        key = key.upper()
+        keys = load_keys()
+        if key in keys:
+            keys[key]["banned"] = True
+            save_keys(keys)
+            bot.sendMessage(chat_id, f"Ключ {key} забанен.")
+        else:
+            bot.sendMessage(chat_id, "Ключ не найден.")
+        return "OK", 200
+
+    # команда /quantity
+    if text == "/quantity" and chat_id == ADMIN_ID:
+        keys = load_keys()
+        total = len(keys)
+        free  = sum(1 for v in keys.values() if not v.get("is_use", False) and not v.get("banned", False))
+        used  = total - free
+        bot.sendMessage(chat_id, f"Всего: {total}, свободно: {free}, использовано: {used}")
+        return "OK", 200
+
+    return "OK", 200
